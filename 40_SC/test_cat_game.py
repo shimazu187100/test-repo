@@ -1,4 +1,4 @@
-from cat_game_v34 import MeowdokuSolver, sample_grid_colors, CAT
+from cat_game_solver import MeowdokuSolver, sample_grid_colors, CAT
 
 def test_solver_cat_count():
     """猫が正しく全8箇所に確定配置されるか検証"""
