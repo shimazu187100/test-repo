@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+# （オプション）すべての生成画像を除外する場合
+# *.png
+# temp_py 配下をすべて無視するが、.gitkeep だけは保持する
+40_SC/temp_py/*
+!40_SC/temp_py/.gitkeep
