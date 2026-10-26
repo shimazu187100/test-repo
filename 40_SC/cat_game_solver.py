@@ -202,8 +202,152 @@ class MeowdokuSolver:
                     self.curr_xs.add((cr, cc)); added = True
         return added
 
+
+    # ==========================================
+    # v35 追加: 状態伝播ヘルパー（仮定検証用）
+    # ==========================================
+
+    def _state_broken(self, cats, xs):
+        """盤面状態が破綻していれば、その理由文字列を返す。破綻していなければ None。
+        破綻条件: (1)猫同士の競合 (2)行・列・色のいずれかに猫を置けるマスが消滅
+        (3)複数色の置き場所が不足する行/列数より少なくなる（ホール条件 / Double-Block系）"""
+        cl = list(cats)
+        for i in range(len(cl)):
+            for j in range(i + 1, len(cl)):
+                (r1, c1), (r2, c2) = cl[i], cl[j]
+                if r1 == r2 or c1 == c2 or self.cid_map[cl[i]] == self.cid_map[cl[j]] or (abs(r1 - r2) <= 1 and abs(c1 - c2) <= 1):
+                    return f"R{r1+1:02d}C{c1+1:02d} と R{r2+1:02d}C{c2+1:02d} の猫が競合する"
+        for r in range(self.size):
+            if not any(cr == r for cr, _ in cats) and all((r, c) in xs for c in range(self.size)):
+                return f"R{r+1:02d}行に猫を置けるマスがなくなる"
+        for c in range(self.size):
+            if not any(cc == c for _, cc in cats) and all((r, c) in xs for r in range(self.size)):
+                return f"C{c+1:02d}列に猫を置けるマスがなくなる"
+        for cid, clist in self.color_cells.items():
+            if not any(p in cats for p in clist) and all(p in xs for p in clist):
+                return f"色(ID:{cid})に猫を置けるマスがなくなる"
+        # ホール条件: k色の候補が k本未満の行(または列)にしか残っていない場合は共存不可能
+        from itertools import combinations
+        unsat = [cid for cid, clist in self.color_cells.items() if not any(p in cats for p in clist)]
+        cand_of = {cid: [p for p in self.color_cells[cid] if p not in xs and p not in cats] for cid in unsat}
+        for k in (2, 3):
+            for combo in combinations(unsat, k):
+                rows_u = set()
+                cols_u = set()
+                for cid in combo:
+                    rows_u |= {r for r, _ in cand_of[cid]}
+                    cols_u |= {c for _, c in cand_of[cid]}
+                if len(rows_u) < k:
+                    return f"色(ID:{','.join(map(str, combo))})の置き場所が{len(rows_u)}行分しか残らない"
+                if len(cols_u) < k:
+                    return f"色(ID:{','.join(map(str, combo))})の置き場所が{len(cols_u)}列分しか残らない"
+        return None
+
+    def _propagate_state(self, cats, xs):
+        """コピーした状態に対して「基礎波及 + 唯一マスへの猫確定」を不動点まで連鎖適用する。
+        戻り値: (cats, xs, broken_reason_or_None, forced_trace)"""
+        cats, xs = set(cats), set(xs)
+        trace = []
+        while True:
+            broken = self._state_broken(cats, xs)
+            if broken:
+                return cats, xs, broken, trace
+            changed = False
+            # 基礎波及: 猫の同列・同行・周囲・同色をXに
+            for r, c in list(cats):
+                targets = [(i, c) for i in range(self.size)] + [(r, i) for i in range(self.size)]
+                targets += [(r + dr, c + dc) for dr, dc in self.dirs if 0 <= r + dr < self.size and 0 <= c + dc < self.size]
+                targets += self.color_cells[self.cid_map[(r, c)]]
+                for p in targets:
+                    if p not in cats and p not in xs:
+                        xs.add(p); changed = True
+            broken = self._state_broken(cats, xs)
+            if broken:
+                return cats, xs, broken, trace
+            # 唯一マス: 色・行・列で候補が1つだけなら猫確定（連鎖）
+            forced = None
+            for cid, clist in self.color_cells.items():
+                if any(p in cats for p in clist):
+                    continue
+                avail = [p for p in clist if p not in xs and p not in cats]
+                if len(avail) == 1:
+                    forced = (avail[0], f"色(ID:{cid})の唯一の空き")
+                    break
+            if forced is None:
+                for r in range(self.size):
+                    if any(cr == r for cr, _ in cats):
+                        continue
+                    avail = [(r, c) for c in range(self.size) if (r, c) not in xs and (r, c) not in cats]
+                    if len(avail) == 1:
+                        forced = (avail[0], f"R{r+1:02d}行の唯一の空き")
+                        break
+            if forced is None:
+                for c in range(self.size):
+                    if any(cc == c for _, cc in cats):
+                        continue
+                    avail = [(r, c) for r in range(self.size) if (r, c) not in xs and (r, c) not in cats]
+                    if len(avail) == 1:
+                        forced = (avail[0], f"C{c+1:02d}列の唯一の空き")
+                        break
+            if forced:
+                cats.add(forced[0])
+                trace.append(forced)
+                changed = True
+            if not changed:
+                return cats, xs, None, trace
+
+    def _find_reserved_sets(self):
+        """5. 予約セット（ホール定理 / 数独の Naked Subset の色版）
+        k本の行(または列)の候補がちょうど k色に限られ、その色がその行(列)の外に置けない場合、
+        その行(列)は k色で予約されるため、行内の他色マスは X に確定する。"""
+        from itertools import combinations
+        for axis in ('row', 'col'):
+            lines = range(self.size)
+            open_lines = []
+            for ln in lines:
+                if axis == 'row':
+                    cells = [(ln, c) for c in range(self.size)]
+                else:
+                    cells = [(r, ln) for r in range(self.size)]
+                if any(p in self.curr_cats for p in cells):
+                    continue
+                avail = [p for p in cells if p not in self.curr_xs and p not in self.curr_cats]
+                if avail:
+                    open_lines.append((ln, avail))
+            for k in (2, 3):
+                for combo in combinations(open_lines, k):
+                    line_ids = [ln for ln, _ in combo]
+                    cells_in = [p for _, av in combo for p in av]
+                    colors_in = {self.cid_map[p] for p in cells_in}
+                    if len(colors_in) != k:
+                        continue
+                    # その色が combo の行(列)の外に候補を持たないこと
+                    confined = True
+                    for cid in colors_in:
+                        if any(p in self.curr_cats for p in self.color_cells[cid]):
+                            confined = False; break
+                        for p in self.color_cells[cid]:
+                            if p in self.curr_xs or p in self.curr_cats:
+                                continue
+                            line_of_p = p[0] if axis == 'row' else p[1]
+                            if line_of_p not in line_ids:
+                                confined = False; break
+                        if not confined:
+                            break
+                    if not confined:
+                        continue
+                    targets = [p for p in cells_in if self.cid_map[p] not in colors_in]
+                    if targets:
+                        unit = '行' if axis == 'row' else '列'
+                        lines_str = '・'.join(f"{'R' if axis=='row' else 'C'}{ln+1:02d}" for ln in line_ids)
+                        colors_str = '・'.join(f"ID:{cid}" for cid in sorted(colors_in))
+                        reason = (f"{lines_str} の{unit}の空きは色({colors_str})の{k}色しかあり得ず、"
+                                  f"この{k}色はこの{k}{unit}以外に置けないため、{k}{unit}は{k}色で予約される（予約セット）")
+                        return [[(p, self.CROSS, reason) for p in targets]]
+        return []
+
     def find_logical_moves(self):
-        """論理推論（基礎推論・限定配置・交差推論・背理法）による1ステップの決定手を探索"""
+        """論理推論（基礎推論・限定配置・交差推論・予約セット・連鎖伝播付き背理法）による1ステップの決定手を探索"""
         while self._propagate_basics():
             pass
 
@@ -268,38 +412,31 @@ class MeowdokuSolver:
                          for p in self.color_cells[cid] if p[1] != c and p not in self.curr_xs and p not in self.curr_cats]
                 if group: return [group]
 
-        # 5. 連鎖法 / 背理法 (仮定推論)
-        def is_broken(t_cats, t_xs):
-            for r in range(self.size):
-                if not any(cr == r for cr, cc in t_cats) and sum(1 for c in range(self.size) if (r, c) not in t_xs) == 0:
-                    return True
-            for c in range(self.size):
-                if not any(cc == c for cr, cc in t_cats) and sum(1 for r in range(self.size) if (r, c) not in t_xs) == 0:
-                    return True
-            for cid, clist in self.color_cells.items():
-                if not any(p in t_cats for p in clist) and sum(1 for p in clist if p not in t_xs) == 0:
-                    return True
-            return False
+        # 5. 予約セット（ホール定理）
+        reserved = self._find_reserved_sets()
+        if reserved:
+            return reserved
 
+        # 6. 連鎖伝播付き背理法（仮定→伝播→破綻判定 / Lookahead）
+        # 旧実装は仮定直後の即時排除だけで判定していたが、v35では
+        # 「基礎波及＋唯一マス確定」を不動点まで連鎖させてから破綻を判定する。
         for r in range(self.size):
             for c in range(self.size):
                 p = (r, c)
                 if p in self.curr_xs or p in self.curr_cats:
                     continue
+                pname = f"R{r+1:02d}C{c+1:02d}"
 
-                test_cats = set(self.curr_cats) | {p}
-                test_xs = set(self.curr_xs)
-                for i in range(self.size): test_xs.add((i, c)); test_xs.add((r, i))
-                for dr, dc in self.dirs:
-                    if 0 <= r+dr < self.size and 0 <= c+dc < self.size:
-                        test_xs.add((r+dr, c+dc))
-                for cr, cc in self.color_cells[self.cid_map[p]]: test_xs.add((cr, cc))
+                _, _, broken, trace = self._propagate_state(set(self.curr_cats) | {p}, set(self.curr_xs))
+                if broken:
+                    chain = ""
+                    if trace:
+                        chain = "（連鎖で " + "、".join(f"R{tr+1:02d}C{tc+1:02d}" for (tr, tc), _ in trace[:2]) + " などが猫に確定）"
+                    return [[(p, self.CROSS, f"{pname} に猫を置くと{chain}、{broken}ため矛盾する（連鎖伝播付き背理法）")]]
 
-                if is_broken(test_cats, test_xs):
-                    return [[(p, self.CROSS, 'ここにネコを置くと他の行・列・色の配置場所が消滅し矛盾するため（背理法）')]]
-
-                if is_broken(self.curr_cats, set(self.curr_xs) | {p}):
-                    return [[(p, self.CAT, 'ここをXにすると他の行・列・色の配置場所が消滅し矛盾するため（背理法）')]]
+                _, _, broken_x, trace_x = self._propagate_state(set(self.curr_cats), set(self.curr_xs) | {p})
+                if broken_x:
+                    return [[(p, self.CAT, f"{pname} をXにすると、{broken_x}ため矛盾する。よってここは猫に確定（連鎖伝播付き背理法）")]]
 
         return []
 
