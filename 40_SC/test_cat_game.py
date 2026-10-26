@@ -21,3 +21,22 @@ def test_solver_logical_moves_generated():
     solver = MeowdokuSolver(sample_grid_colors)
     solver.solve_step_by_step()
     assert len(solver.curr_xs) > 0 or len(solver.curr_cats) > 0, "確定手が導出されませんでした"
+
+def test_solver_solves_sample_by_logic_only():
+    """v35: サンプル盤面が論理推論のみで完解し、全解探索の一意解と一致するか検証"""
+    solver = MeowdokuSolver(sample_grid_colors)
+    solver.solve_step_by_step()
+    assert len(solver.curr_cats) == len(sample_grid_colors), "論理推論だけで全ての猫を確定できませんでした"
+    reference = MeowdokuSolver(sample_grid_colors)
+    sols = reference.solve_all_solutions()
+    assert len(sols) == 1
+    assert tuple(sorted(solver.curr_cats)) == sols[0]
+
+def test_logical_moves_have_human_reasons():
+    """v35: 決定手には人間向けの理由が必ず付くか検証"""
+    solver = MeowdokuSolver(sample_grid_colors)
+    groups = solver.find_logical_moves()
+    assert groups, "初手の決定手が見つかりませんでした"
+    for group in groups:
+        for (_, _, reason) in group:
+            assert isinstance(reason, str) and len(reason) > 0
